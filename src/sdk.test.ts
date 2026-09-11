@@ -118,3 +118,26 @@ test("Server-SDK: environment wandert in jedes Event; ohne Angabe fehlt es (Coll
   // Standard — eine zweite Quelle der Wahrheit würde nur auseinanderlaufen.
   assert.equal("environment" in (sent[1] ?? {}), false);
 });
+
+test("Server-Client wirft nie — ein unsauberes Feld wird zum Ergebnis, nicht zur Ausnahme", async () => {
+  const td = createClient({ endpoint: "https://example.test/collect", fetchImpl: async () => new Response(null, { status: 204 }) });
+  const zirkulaer: Record<string, unknown> = {};
+  zirkulaer.self = zirkulaer;
+  // So etwas kommt aus echten Bestell-Objekten (ORM-Entities mit Rückverweis).
+  const res = await td.purchase({ value: 89.9, currency: "EUR", metadata: zirkulaer } as never);
+  assert.equal(res.ok, false);
+  assert.match(res.event_id, /^evt_/, "die event_id steht trotzdem fest — für den Dedup-Partner im Browser");
+});
+
+test("Server-Client: unerreichbarer Collector ergibt ok:false, keinen Wurf", async () => {
+  const td = createClient({
+    endpoint: "https://example.test/collect",
+    retries: 0,
+    fetchImpl: async () => {
+      throw new TypeError("fetch failed");
+    },
+  });
+  const res = await td.lead("probetraining", { email: "kunde@example.de" });
+  assert.equal(res.ok, false);
+  assert.match(res.error ?? "", /fetch failed/);
+});

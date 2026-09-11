@@ -61,7 +61,7 @@ const DEFAULT_TIMEOUT_MS = 2000;
  * eines Shops enthält Sitzungs- und Login-Cookies — die haben auf einem
  * fremden Server nichts verloren.
  */
-const FORWARD_COOKIES = ["_td_vid", "_td_attr", "_fbp", "_fbc", "_ga", "_gcl_aw", "_gcl_au"] as const;
+const FORWARD_COOKIES = ["_td_vid", "_td_attr", "_td_touch", "_fbp", "_fbc", "_ga", "_gcl_aw", "_gcl_au"] as const;
 
 /** Mehr Glieder trägt keine echte Proxy-Kette; alles darüber bläht nur den Request auf. */
 const MAX_CHAIN = 10;
@@ -218,12 +218,62 @@ export function createCollectProxy(options: CollectProxyOptions): (request: Requ
   const requireConsent = options.visitorCookie?.requireConsent ?? false;
   const maxAgeDays = options.visitorCookie?.maxAgeDays ?? DEFAULT_COOKIE_DAYS;
 
+  // Der Collector-Host ohne `/collect`: Dort liegen die Nebenwege für den
+  // Trackdolphin-Banner (`/collect/consent-banner`, `/collect/consent`).
+  const collectorBase = endpoint.replace(/\/+$/, "").replace(/\/collect$/, "") + "/collect";
+
   return async function handleCollect(request: Request): Promise<Response> {
     // Dieselbe Herkunft: kein Preflight, keine CORS-Köpfe nötig. Ein OPTIONS
     // kommt trotzdem vor (Proxys, Sicherheits-Scanner) und soll leise enden.
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: { Allow: "POST, OPTIONS" } });
+      return new Response(null, { status: 204, headers: { Allow: "GET, POST, OPTIONS" } });
     }
+
+    // Zwei Nebenwege für Trackdolphin Consent, den eigenen Banner des Projekts
+    // (`init({ consent: true })` im SDK): die veröffentlichte Konfiguration
+    // holen und jede Entscheidung als Nachweis weiterreichen. Beides über den
+    // Shop, damit der Browser keinen fremden Host sieht. Die Route muss dafür
+    // Unterpfade annehmen (`/td/*`, siehe README).
+    const pathname = (() => { try { return new URL(request.url).pathname; } catch { return ""; } })();
+    if (pathname.endsWith("/consent-banner")) {
+      if (request.method !== "GET") return new Response(null, { status: 405, headers: { Allow: "GET" } });
+      try {
+        const upstream = await fetchImpl(
+          `${collectorBase}/consent-banner${shopId ? `?project=${encodeURIComponent(shopId)}` : ""}`,
+          { signal: AbortSignal.timeout(timeoutMs) },
+        );
+        const body = await upstream.text();
+        return new Response(upstream.status === 200 ? body : null, {
+          status: upstream.status === 200 ? 200 : 404,
+          headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=60" },
+        });
+      } catch (e) {
+        log(`Consent-Banner nicht abrufbar: ${String(e)}`);
+        return new Response(null, { status: 502 });
+      }
+    }
+    if (pathname.endsWith("/consent")) {
+      if (request.method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
+      const bytes = await request.arrayBuffer();
+      if (bytes.byteLength > maxBodyBytes) return new Response(null, { status: 413 });
+      let record: Record<string, unknown>;
+      try { record = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>; } catch { return new Response(null, { status: 400 }); }
+      if (!record || typeof record !== "object" || typeof record.decision !== "object") return new Response(null, { status: 400 });
+      if (shopId) record.project_id = shopId;
+      try {
+        const upstream = await fetchImpl(`${collectorBase}/consent`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(record),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        return new Response(null, { status: upstream.status >= 200 && upstream.status < 300 ? 204 : upstream.status === 429 ? 429 : 502 });
+      } catch (e) {
+        log(`Consent-Nachweis nicht zustellbar: ${String(e)}`);
+        return new Response(null, { status: 502 });
+      }
+    }
+
     if (request.method !== "POST") {
       return new Response(null, { status: 405, headers: { Allow: "POST, OPTIONS" } });
     }

@@ -1,6 +1,6 @@
 {
   "name": "@trackdolphin/sdk",
-  "version": "0.1.0",
+  "version": "0.5.1",
   "description": "Trackdolphin SDK, Events aus Browser und Server senden, Collect-Proxy für Headless-Shops",
   "license": "MIT",
   "homepage": "https://trackdolphin.com/docs/sdk",
@@ -48,9 +48,11 @@
     "prepublishOnly": "pnpm run build"
   },
   "devDependencies": {
+    "@trackdolphin/event-schema": "workspace:*",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.2",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "@trackdolphin/attribution": "workspace:*"
   },
   "author": {
     "name": "Trackdolphin",

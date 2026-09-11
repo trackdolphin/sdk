@@ -62,8 +62,34 @@ export function createClient(opts: ServerClientOptions) {
     fetchImpl = fetch,
   } = opts;
 
+  /**
+   * Hashen, das höchstens das eigene Feld kostet. Ein Event ohne `em` matcht
+   * schlechter; ein geworfener Fehler stünde dagegen mitten in der
+   * Bestellstrecke des Aufrufers.
+   */
+  async function safeHash(hash: () => Promise<string>): Promise<string | undefined> {
+    try {
+      return await hash();
+    } catch (e) {
+      console.warn("[trackdolphin] Hashing übersprungen:", e);
+      return undefined;
+    }
+  }
+
   async function send(ev: TrackEvent): Promise<SendResult> {
     const eventId = ev.event_id ?? newEventId();
+    let body: string;
+    try {
+      body = await buildBody(ev, eventId);
+    } catch (e) {
+      // Diese Funktion lehnt nie ab — der Aufrufer sieht einen Fehlschlag im
+      // Ergebnis, nicht als Ausnahme in seinem Bestell-Code.
+      return { ok: false, status: 0, event_id: eventId, error: String(e) };
+    }
+    return sendBody(body, eventId);
+  }
+
+  async function buildBody(ev: TrackEvent, eventId: string): Promise<string> {
     const payload: Record<string, unknown> = {
       ...ev,
       event_id: eventId,
@@ -73,23 +99,26 @@ export function createClient(opts: ServerClientOptions) {
     if (opts.environment) payload.environment = opts.environment;
 
     // Klartext hier hashen — der Collector nimmt nur SHA-256 an.
-    if (ev.email) payload.em = await ensureHashed(ev.email, "email");
+    if (ev.email) payload.em = await safeHash(() => ensureHashed(ev.email!, "email"));
     if (ev.phone) {
       // Zwei Hashes: Meta verlangt die Nummer ohne, Google mit Pluszeichen.
-      payload.ph = await hashPhone(ev.phone, defaultCountry);
-      payload.ph_e164 = await hashPhoneE164(ev.phone, defaultCountry);
+      payload.ph = await safeHash(() => hashPhone(ev.phone!, defaultCountry));
+      payload.ph_e164 = await safeHash(() => hashPhoneE164(ev.phone!, defaultCountry));
     }
     delete payload.email;
     delete payload.phone;
     for (const k of Object.keys(payload)) if (payload[k] === undefined) delete payload[k];
+    return JSON.stringify(payload);
+  }
 
+  async function sendBody(body: string, eventId: string): Promise<SendResult> {
     let lastError = "";
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
         const res = await fetchImpl(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+          body,
           signal: AbortSignal.timeout(timeoutMs),
         });
         // 4xx sind Anwendungsfehler — die behebt kein Neuversuch.

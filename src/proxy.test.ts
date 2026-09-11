@@ -241,3 +241,50 @@ test("Kein JSON-Objekt: Rohtext geht unverändert weiter, kein Cookie", async ()
   await proxy(post("kein json"));
   assert.equal(calls[1]!.body, "kein json");
 });
+
+
+// ---------------------------------------------------------------------------
+// Trackdolphin Consent: Nebenwege für Banner-Konfiguration und Nachweis
+// ---------------------------------------------------------------------------
+test("Proxy: /consent-banner holt die veröffentlichte Fassung vom Collector, mit Projekt", async () => {
+  const calls: { url: string; init?: RequestInit }[] = [];
+  const fetchImpl = (async (url: string, init?: RequestInit) => {
+    calls.push({ url, init });
+    return new Response(JSON.stringify({ schema: 1, projectId: "p1" }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const handle = createCollectProxy({ endpoint: "https://abc.trdph.com/collect", shopId: "p1", fetchImpl });
+  const res = await handle(new Request("https://shop.example/td/consent-banner", { method: "GET" }));
+  assert.equal(res.status, 200);
+  assert.equal(calls[0]!.url, "https://abc.trdph.com/collect/consent-banner?project=p1");
+  assert.equal((await res.json()).schema, 1);
+  assert.equal(res.headers.get("Cache-Control"), "public, max-age=60");
+});
+
+test("Proxy: ohne veröffentlichte Fassung antwortet /consent-banner leer mit 404", async () => {
+  const fetchImpl = (async () => new Response('{"error":"no_banner"}', { status: 404 })) as unknown as typeof fetch;
+  const handle = createCollectProxy({ endpoint: "https://abc.trdph.com/collect", fetchImpl });
+  const res = await handle(new Request("https://shop.example/td/consent-banner"));
+  assert.equal(res.status, 404);
+});
+
+test("Proxy: /consent reicht die Entscheidung mit Projektkennung an den Collector weiter", async () => {
+  const calls: { url: string; body: string }[] = [];
+  const fetchImpl = (async (url: string, init?: RequestInit) => {
+    calls.push({ url, body: String(init?.body ?? "") });
+    return new Response('{"ok":true}', { status: 202 });
+  }) as unknown as typeof fetch;
+  const handle = createCollectProxy({ endpoint: "https://abc.trdph.com/collect", shopId: "p1", fetchImpl });
+  const res = await handle(new Request("https://shop.example/td/consent", {
+    method: "POST",
+    body: JSON.stringify({ decision: { v: 1, action: "accept_all", purposes: { marketing: true } }, lang: "de" }),
+  }));
+  assert.equal(res.status, 204);
+  assert.equal(calls[0]!.url, "https://abc.trdph.com/collect/consent");
+  const body = JSON.parse(calls[0]!.body);
+  assert.equal(body.project_id, "p1");
+  assert.equal(body.decision.action, "accept_all");
+  // Ohne Entscheidung: 400, und nichts geht an den Collector.
+  const leer = await handle(new Request("https://shop.example/td/consent", { method: "POST", body: '{"lang":"de"}' }));
+  assert.equal(leer.status, 400);
+  assert.equal(calls.length, 1);
+});
